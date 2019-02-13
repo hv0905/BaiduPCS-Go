@@ -193,6 +193,11 @@ func (c *PCSConfig) SetProxy(proxy string) {
 	requester.SetGlobalProxy(proxy)
 }
 
+// SetAccessPass 设置登录密码
+func (c *PCSConfig) SetAccessPass(pass string) {
+	c.accessPass = pass
+}
+
 // SetLocalAddrs 设置localAddrs
 func (c *PCSConfig) SetLocalAddrs(localAddrs string) {
 	c.localAddrs = localAddrs

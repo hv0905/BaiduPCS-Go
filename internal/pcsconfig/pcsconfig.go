@@ -44,6 +44,7 @@ type PCSConfig struct {
 	saveDir           string // 下载储存路径
 	enableHTTPS       bool   // 启用https
 	proxy             string // 代理
+	accessPass        string // 密码启动
 	localAddrs        string // 本地网卡地址
 
 	configFilePath string
@@ -217,6 +218,7 @@ func (c *PCSConfig) initDefaultConfig() {
 	c.maxUploadParallel = 10
 	c.maxDownloadLoad = 1
 	c.userAgent = "netdisk;8.3.1;android-android"
+	c.accessPass = ""
 
 	// 设置默认的下载路径
 	switch runtime.GOOS {

@@ -73,8 +73,7 @@ func RunShareList(page int) {
 	tb.Render()
 }
 
-// getShareDLink pcspath 为文件的路径, 不是目录
-func getShareDLink(pcspath string) (dlink string, err error) {
+func GetShareDLink(pcspath string) (dlink string, err error) {
 	var (
 		pcs = GetBaiduPCS()
 	)

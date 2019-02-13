@@ -27,6 +27,7 @@ type pcsConfigJSONExport struct {
 	SaveDir     string `json:"savedir"`      // 下载储存路径
 	EnableHTTPS bool   `json:"enable_https"` // 启用https
 	Proxy       string `json:"proxy"`        // 代理
+	AccessPass  string `json:"access_pass"`  // 登录密码
 	LocalAddrs  string `json:"local_addrs"`
 }
 
@@ -117,6 +118,11 @@ func (c *PCSConfig) EnableHTTPS() bool {
 // Proxy 返回代理地址
 func (c *PCSConfig) Proxy() string {
 	return c.proxy
+}
+
+// AccessPass 返回登录密码
+func (c *PCSConfig) AccessPass() string {
+	return c.accessPass
 }
 
 // LocalAddrs 返回localAddrs
