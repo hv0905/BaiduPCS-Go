@@ -3,6 +3,8 @@ package getip
 
 import (
 	"github.com/iikira/BaiduPCS-Go/requester"
+	"net"
+	"net/http"
 	"unsafe"
 )
 
@@ -12,15 +14,20 @@ func IPInfoByClient(c *requester.HTTPClient) (ipAddr string, err error) {
 		c = requester.NewHTTPClient()
 	}
 
-	body, err := c.Fetch("GET", "https://api.ipify.org", nil, nil)
+	body, err := c.Fetch(http.MethodGet, "https://api.ipify.org", nil, nil)
 	if err != nil {
-		return "", err
+		return
 	}
 
-	return *(*string)(unsafe.Pointer(&body)), nil
+	ipAddr = *(*string)(unsafe.Pointer(&body))
+	ip := net.ParseIP(ipAddr)
+	if ip == nil {
+		return "", ErrParseIP
+	}
+	return
 }
 
-//IPInfo 获取IP地址和IP位置
+//IPInfo 从ipify获取IP地址
 func IPInfo(https bool) (ipAddr string, err error) {
 	c := requester.NewHTTPClient()
 	c.SetHTTPSecure(https)

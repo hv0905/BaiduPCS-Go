@@ -97,7 +97,7 @@ func (pcs *BaiduPCS) RapidUpload(targetPath, contentMD5, sliceMD5, crc32 string,
 	}
 
 	// 更新缓存
-	pcs.updateFilesDirectoriesCache([]string{path.Dir(targetPath)})
+	pcs.deleteCache([]string{path.Dir(targetPath)})
 	return nil
 }
 
@@ -144,7 +144,7 @@ func (pcs *BaiduPCS) Upload(targetPath string, uploadFunc UploadFunc) (pcsError 
 	}
 
 	// 更新缓存
-	pcs.updateFilesDirectoriesCache([]string{path.Dir(targetPath)})
+	pcs.deleteCache([]string{path.Dir(targetPath)})
 	return nil
 }
 
@@ -178,8 +178,8 @@ func (pcs *BaiduPCS) UploadTmpFile(uploadFunc UploadFunc) (md5 string, pcsError 
 }
 
 // UploadCreateSuperFile 分片上传—合并分片文件
-func (pcs *BaiduPCS) UploadCreateSuperFile(targetPath string, blockList ...string) (pcsError pcserror.Error) {
-	dataReadCloser, pcsError := pcs.PrepareUploadCreateSuperFile(targetPath, blockList...)
+func (pcs *BaiduPCS) UploadCreateSuperFile(checkDir bool, targetPath string, blockList ...string) (pcsError pcserror.Error) {
+	dataReadCloser, pcsError := pcs.PrepareUploadCreateSuperFile(checkDir, targetPath, blockList...)
 	if pcsError != nil {
 		return pcsError
 	}
@@ -192,7 +192,7 @@ func (pcs *BaiduPCS) UploadCreateSuperFile(targetPath string, blockList ...strin
 	}
 
 	// 更新缓存
-	pcs.updateFilesDirectoriesCache([]string{path.Dir(targetPath)})
+	pcs.deleteCache([]string{path.Dir(targetPath)})
 	return nil
 }
 

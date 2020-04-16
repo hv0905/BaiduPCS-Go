@@ -2,54 +2,18 @@
 package converter
 
 import (
-	"fmt"
+	"github.com/mattn/go-runewidth"
 	"reflect"
 	"strconv"
+	"strings"
 	"unicode"
 	"unsafe"
 )
 
 const (
-	// B byte
-	B = (int64)(1 << (10 * iota))
-	// KB kilobyte
-	KB
-	// MB megabyte
-	MB
-	// GB gigabyte
-	GB
-	// TB terabyte
-	TB
-	// PB petabyte
-	PB
+	// InvalidChars 文件名中的非法字符
+	InvalidChars = `\/:*?"<>|`
 )
-
-// ConvertFileSize 文件大小格式化输出
-func ConvertFileSize(size int64, precision ...int) string {
-	pint := "6"
-	if len(precision) == 1 {
-		pint = fmt.Sprint(precision[0])
-	}
-	if size < 0 {
-		return "0B"
-	}
-	if size < KB {
-		return fmt.Sprintf("%dB", size)
-	}
-	if size < MB {
-		return fmt.Sprintf("%."+pint+"fKB", float64(size)/float64(KB))
-	}
-	if size < GB {
-		return fmt.Sprintf("%."+pint+"fMB", float64(size)/float64(MB))
-	}
-	if size < TB {
-		return fmt.Sprintf("%."+pint+"fGB", float64(size)/float64(GB))
-	}
-	if size < PB {
-		return fmt.Sprintf("%."+pint+"fTB", float64(size)/float64(TB))
-	}
-	return fmt.Sprintf("%."+pint+"fPB", float64(size)/float64(PB))
-}
 
 // ToString unsafe 转换, 将 []byte 转换为 string
 func ToString(p []byte) string {
@@ -64,6 +28,11 @@ func ToBytes(str string) []byte {
 		Len:  strHeader.Len,
 		Cap:  strHeader.Len,
 	}))
+}
+
+// ToBytesUnsafe unsafe 转换, 请确保转换后的 []byte 不涉及 cap() 操作, 将 string 转换为 []byte
+func ToBytesUnsafe(str string) []byte {
+	return *(*[]byte)(unsafe.Pointer(&str))
 }
 
 // IntToBool int 类型转换为 bool
@@ -128,16 +97,36 @@ func MustInt64(s string) (i int64) {
 
 // ShortDisplay 缩略显示字符串s, 显示长度为num, 缩略的内容用"..."填充
 func ShortDisplay(s string, num int) string {
-	rs := []rune(s)
-	for k := 0; k < len(rs); k++ {
-		if unicode.Is(unicode.C, rs[k]) { // 去除无效字符
-			rs = append(rs[:k], rs[k+1:]...)
-			k--
+	var (
+		sb = strings.Builder{}
+		n  int
+	)
+	for _, v := range s {
+		if unicode.Is(unicode.C, v) { // 去除无效字符
 			continue
 		}
-		if k >= num {
-			return string(rs[:k]) + "..."
+		n += runewidth.RuneWidth(v)
+		if n > num {
+			sb.WriteString("...")
+			break
 		}
+		sb.WriteRune(v)
 	}
-	return string(rs)
+
+	return sb.String()
+}
+
+// TrimPathInvalidChars 清除文件名中的非法字符
+func TrimPathInvalidChars(fpath string) string {
+	buf := make([]byte, 0, len(fpath))
+
+	for _, c := range ToBytesUnsafe(fpath) {
+		if strings.ContainsRune(InvalidChars, rune(c)) {
+			continue
+		}
+
+		buf = append(buf, c)
+	}
+
+	return ToString(buf)
 }

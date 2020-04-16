@@ -4,42 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/iikira/BaiduPCS-Go/pcsutil/cachepool"
 	"github.com/iikira/BaiduPCS-Go/pcsverbose"
 	"github.com/iikira/BaiduPCS-Go/requester"
-	"github.com/iikira/BaiduPCS-Go/requester/downloader/cachepool"
 	"github.com/iikira/BaiduPCS-Go/requester/rio/speeds"
+	"github.com/iikira/BaiduPCS-Go/requester/transfer"
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 type (
 	//Worker 工作单元
 	Worker struct {
-		speedsPerSecond int64 //速度
-		wrange          Range
-		speedsStat      speeds.Speeds
-		id              int    //id
-		cacheSize       int    //下载缓存
-		url             string //下载地址
-		referer         string //来源地址
-		acceptRanges    string
-		client          *requester.HTTPClient
-		firstResp       *http.Response // 第一个响应
-		writerAt        io.WriterAt
-		writeMu         *sync.Mutex
-		execMu          sync.Mutex
+		totalSize    int64 // 整个文件的大小, worker请求range时会获取尝试获取该值, 如果不匹配, 则返回错误
+		wrange       *transfer.Range
+		speedsStat   *speeds.Speeds
+		id           int    //id
+		url          string //下载地址
+		referer      string //来源地址
+		acceptRanges string
+		client       *requester.HTTPClient
+		firstResp    *http.Response // 第一个响应
+		writerAt     io.WriterAt
+		writeMu      *sync.Mutex
+		execMu       sync.Mutex
 
-		paused                 bool
 		pauseChan              chan struct{}
 		workerCancelFunc       context.CancelFunc
 		resetFunc              context.CancelFunc
 		readRespBodyCancelFunc func()
 		err                    error //错误信息
 		status                 WorkerStatus
-		downloadStatus         *DownloadStatus //总的下载状态
+		downloadStatus         *transfer.DownloadStatus //总的下载状态
 	}
 
 	// WorkerList worker列表
@@ -71,17 +68,25 @@ func (wer *Worker) lazyInit() {
 	if wer.client == nil {
 		wer.client = requester.NewHTTPClient()
 	}
-	if wer.writeMu == nil {
-		wer.writeMu = &sync.Mutex{}
-	}
 	if wer.pauseChan == nil {
 		wer.pauseChan = make(chan struct{})
+	}
+	if wer.wrange == nil {
+		wer.wrange = &transfer.Range{}
 	}
 	if wer.wrange.LoadBegin() == 0 && wer.wrange.LoadEnd() == 0 {
 		// 取消多线程下载
 		wer.acceptRanges = ""
 		wer.wrange.StoreEnd(-2)
 	}
+	if wer.speedsStat == nil {
+		wer.speedsStat = &speeds.Speeds{}
+	}
+}
+
+// SetTotalSize 设置整个文件的大小, worker请求range时会获取尝试获取该值, 如果不匹配, 则返回错误
+func (wer *Worker) SetTotalSize(size int64) {
+	wer.totalSize = size
 }
 
 //SetClient 设置http客户端
@@ -89,16 +94,19 @@ func (wer *Worker) SetClient(c *requester.HTTPClient) {
 	wer.client = c
 }
 
-//SetCacheSize 设置下载缓存
-func (wer *Worker) SetCacheSize(size int) {
-	wer.cacheSize = size
-	fixCacheSize(&wer.cacheSize)
+//SetAcceptRange 设置AcceptRange
+func (wer *Worker) SetAcceptRange(acceptRanges string) {
+	wer.acceptRanges = acceptRanges
 }
 
 //SetRange 设置请求范围
-func (wer *Worker) SetRange(acceptRanges string, r Range) {
-	wer.acceptRanges = acceptRanges
-	wer.wrange = r
+func (wer *Worker) SetRange(r *transfer.Range) {
+	if wer.wrange == nil {
+		wer.wrange = r
+		return
+	}
+	wer.wrange.StoreBegin(r.LoadBegin())
+	wer.wrange.StoreEnd(r.LoadEnd())
 }
 
 //SetReferer 设置来源
@@ -112,24 +120,24 @@ func (wer *Worker) SetWriteMutex(mu *sync.Mutex) {
 }
 
 //SetDownloadStatus 增加其他需要统计的数据
-func (wer *Worker) SetDownloadStatus(downloadStatus *DownloadStatus) {
+func (wer *Worker) SetDownloadStatus(downloadStatus *transfer.DownloadStatus) {
 	wer.downloadStatus = downloadStatus
 }
 
 //GetStatus 返回下载状态
-func (wer *Worker) GetStatus() Status {
+func (wer *Worker) GetStatus() WorkerStatuser {
 	// 空接口与空指针不等价
 	return &wer.status
 }
 
 //GetRange 返回worker范围
-func (wer *Worker) GetRange() *Range {
-	return &wer.wrange
+func (wer *Worker) GetRange() *transfer.Range {
+	return wer.wrange
 }
 
 //GetSpeedsPerSecond 获取每秒的速度
 func (wer *Worker) GetSpeedsPerSecond() int64 {
-	return atomic.LoadInt64(&wer.speedsPerSecond)
+	return wer.speedsStat.GetSpeeds()
 }
 
 //Pause 暂停下载
@@ -140,16 +148,18 @@ func (wer *Worker) Pause() {
 		return
 	}
 
-	if wer.paused {
+	if wer.status.statusCode == StatusCodePaused {
 		return
 	}
 	wer.pauseChan <- struct{}{}
-	wer.paused = true
+	wer.status.statusCode = StatusCodePaused
 }
 
 //Resume 恢复下载
 func (wer *Worker) Resume() {
-	wer.paused = false
+	if wer.status.statusCode != StatusCodePaused {
+		return
+	}
 	go wer.Execute()
 }
 
@@ -175,7 +185,7 @@ func (wer *Worker) Reset() {
 	if wer.readRespBodyCancelFunc != nil {
 		wer.readRespBodyCancelFunc()
 	}
-	wer.CleanStatus()
+	wer.ClearStatus()
 	go wer.Execute()
 }
 
@@ -204,25 +214,9 @@ func (wer *Worker) Failed() bool {
 	}
 }
 
-//CleanStatus 清空状态
-func (wer *Worker) CleanStatus() {
+//ClearStatus 清空状态
+func (wer *Worker) ClearStatus() {
 	wer.status.statusCode = StatusCodeInit
-}
-
-// updateSpeeds 更新速度
-func (wer *Worker) updateSpeeds(ctx context.Context) {
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				atomic.StoreInt64(&wer.speedsPerSecond, 0)
-				return
-			default:
-				atomic.StoreInt64(&wer.speedsPerSecond, wer.speedsStat.GetSpeedsPerSecond())
-				time.Sleep(1 * time.Second)
-			}
-		}
-	}()
 }
 
 //Err 返回worker错误
@@ -237,11 +231,11 @@ func (wer *Worker) Execute() {
 	wer.execMu.Lock()
 	defer wer.execMu.Unlock()
 
+	wer.status.statusCode = StatusCodeInit
 	single := wer.acceptRanges == ""
 
 	// 如果已暂停, 退出
-	if wer.paused {
-		wer.status.statusCode = StatusCodePaused
+	if wer.status.statusCode == StatusCodePaused {
 		return
 	}
 
@@ -267,7 +261,7 @@ func (wer *Worker) Execute() {
 	}
 	//检测是否支持range
 	if wer.acceptRanges != "" && wer.wrange.Len() >= 0 {
-		header["Range"] = fmt.Sprintf("%s=%d-%d", wer.acceptRanges, wer.wrange.LoadBegin(), wer.wrange.LoadEnd())
+		header["Range"] = fmt.Sprintf("%s=%d-%d", wer.acceptRanges, wer.wrange.LoadBegin(), wer.wrange.LoadEnd()-1)
 	}
 
 	wer.status.statusCode = StatusCodePending
@@ -276,7 +270,7 @@ func (wer *Worker) Execute() {
 	if wer.firstResp != nil {
 		resp = wer.firstResp // 使用第一个连接
 	} else {
-		resp, wer.err = wer.client.Req("GET", wer.url, nil, header)
+		resp, wer.err = wer.client.Req(http.MethodGet, wer.url, nil, header)
 	}
 	if resp != nil {
 		defer func() {
@@ -292,19 +286,7 @@ func (wer *Worker) Execute() {
 		return
 	}
 
-	var (
-		contentLength = resp.ContentLength
-		rangeLength   = wer.wrange.Len()
-	)
-
-	if !single {
-		if contentLength != rangeLength && wer.firstResp == nil { // 跳过检查第一个连接
-			wer.status.statusCode = StatusCodeNetError
-			wer.err = fmt.Errorf("Content-Length is unexpected: %d, need %d", contentLength, rangeLength)
-			return
-		}
-	}
-
+	// 判断响应状态
 	switch resp.StatusCode {
 	case 200, 206:
 		// do nothing, continue
@@ -326,20 +308,37 @@ func (wer *Worker) Execute() {
 		return
 	}
 
-	fixCacheSize(&wer.cacheSize)
 	var (
-		speedsCtx, speedsCancelFunc = context.WithCancel(context.Background())
-		cache                       = cachepool.Require(wer.cacheSize)
-		buf                         = cache.Bytes()
-		n, nn                       int
-		n64, nn64                   int64
+		contentLength = resp.ContentLength
+		rangeLength   = wer.wrange.Len()
 	)
 
-	wer.updateSpeeds(speedsCtx)
-	defer func() {
-		speedsCancelFunc() // 结束速度统计
-		cache.Free()
-	}()
+	if !single {
+		// 检查请求长度
+		if contentLength != rangeLength && wer.firstResp == nil { // 跳过检查第一个连接
+			wer.status.statusCode = StatusCodeNetError
+			wer.err = fmt.Errorf("Content-Length is unexpected: %d, need %d", contentLength, rangeLength)
+			return
+		}
+		// 检查总大小
+		if wer.totalSize > 0 {
+			total := ParseContentRange(resp.Header.Get("Content-Range"))
+			if total > 0 {
+				if total != wer.totalSize {
+					wer.status.statusCode = StatusCodeInternalError // 这里设置为内部错误, 强制停止下载
+					wer.err = fmt.Errorf("Content-Range total length is unexpected: %d, need %d", total, wer.totalSize)
+					return
+				}
+			}
+		}
+	}
+
+	var (
+		buf       = cachepool.SyncPool.Get().([]byte)
+		n, nn     int
+		n64, nn64 int64
+	)
+	defer cachepool.SyncPool.Put(buf)
 
 	for {
 		select {
@@ -350,7 +349,6 @@ func (wer *Worker) Execute() {
 			wer.status.statusCode = StatusCodeReseted
 			return
 		case <-wer.pauseChan: //暂停
-			wer.status.statusCode = StatusCodePaused
 			return
 		default:
 			wer.status.statusCode = StatusCodeDownloading
@@ -366,7 +364,7 @@ func (wer *Worker) Execute() {
 
 				// 更新速度统计
 				if wer.downloadStatus != nil {
-					wer.downloadStatus.AddSpeedsDownloaded(nn64)
+					wer.downloadStatus.AddSpeedsDownloaded(nn64) // 限速在这里阻塞
 				}
 				wer.speedsStat.Add(nn64)
 				n += nn
@@ -400,22 +398,31 @@ func (wer *Worker) Execute() {
 			// 写入数据
 			if wer.writerAt != nil {
 				wer.status.statusCode = StatusCodeWaitToWrite
-				wer.writeMu.Lock()                                           // 加锁, 减轻硬盘的压力
+				if wer.writeMu != nil {
+					wer.writeMu.Lock() // 加锁, 减轻硬盘的压力
+				}
 				_, wer.err = wer.writerAt.WriteAt(buf[:n], wer.wrange.Begin) // 写入数据
 				if wer.err != nil {
-					wer.writeMu.Unlock()
+					if wer.writeMu != nil {
+						wer.writeMu.Unlock() //解锁
+					}
 					wer.status.statusCode = StatusCodeInternalError
 					return
 				}
 
-				wer.writeMu.Unlock() //解锁
+				if wer.writeMu != nil {
+					wer.writeMu.Unlock() //解锁
+				}
 				wer.status.statusCode = StatusCodeDownloading
 			}
 
-			// 更新数据
+			// 更新下载统计数据
 			wer.wrange.AddBegin(n64)
 			if wer.downloadStatus != nil {
 				wer.downloadStatus.AddDownloaded(n64)
+				if single {
+					wer.downloadStatus.AddTotalSize(n64)
+				}
 			}
 
 			if readErr != nil {
